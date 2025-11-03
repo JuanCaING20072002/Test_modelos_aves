@@ -11,12 +11,14 @@ seaborn
 scikit-learn
 Pillow
 
-# TensorFlow y utilidades (usar Python 3.10 para tensorflow==2.17.1)
+# TensorFlow y utilidades
+# Usamos tensorflow 2.20 en la rama de despliegue para Py3.13
 tensorflow==2.20.0
-tensorflow-io==0.37.1
+# tensorflow-io removed because wheels may be unavailable on the cloud image
+# tensorflow-io==0.37.1
 
 # Dependencias para el modelo híbrido PennyLane / JAX
-ml-dtypes==0.4.0
+ml-dtypes>=0.5.1,<1.0.0
 jax==0.4.26
 jaxlib==0.4.26
 pennylane==0.41.0
