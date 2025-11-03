@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+.venv*/
+venv/
+venv*/
+env/
+env*/
+ml_env/
+
+# IDEs and editors
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data / large raw files (don't commit datasets)
+datos/
+*.csv
+*.zip
+
+# Notebook checkpoints
+.ipynb_checkpoints/
+
+# Logs
+*.log
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Keep modelos/ (models) tracked — they are managed with Git LFS via .gitattributes

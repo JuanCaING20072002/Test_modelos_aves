@@ -1,0 +1,25 @@
+# Requisitos para el proyecto "Test_De_Modelos"
+# Recomendación: usar Python 3.10 para garantizar compatibilidad con TensorFlow 2.17
+# Comentarios: jaxlib en Windows puede requerir instalar una wheel específica; si falla,
+# seguir las instrucciones en https://github.com/google/jax#installation
+
+streamlit
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+Pillow
+
+# TensorFlow y utilidades (usar Python 3.10 para tensorflow==2.17.1)
+tensorflow==2.17.1
+tensorflow-io==0.37.1
+
+# Dependencias para el modelo híbrido PennyLane / JAX
+ml-dtypes==0.4.0
+jax==0.4.26
+jaxlib==0.4.26
+pennylane==0.41.0
+autoray>=0.6.11
+
+# Nota: si no vas a ejecutar modelos cuánticos localmente, puedes omitir pennylane/jax/jaxlib
