@@ -636,12 +636,82 @@ def predict_proba(x: np.ndarray) -> np.ndarray:
     return preds
 # Buscar imagen de referencia para una clase
 def find_reference_image(class_name: str):
-    for split in ["test", "train"]:
+    """Buscar una imagen de referencia para una clase.
+
+    Estrategia (en este orden):
+    1. Buscar carpeta exacta `datos/{split}/{class_name}` en splits ['valid','test','train'].
+    2. Si `class_name` tiene formato 'class_{i}', mapear al i-ésimo subdirectorio ordenado en `datos/{split}`.
+    3. Buscar en carpetas del modelo (`MODEL_PATH`) en subdirs comunes: assets, examples, reference.
+    4. Buscar por coincidencia parcial de nombre de archivo en `datos/` y `modelos/` (filename contiene clase o nombre común).
+    Devuelve ruta absoluta de la primera imagen encontrada o None si no hay coincidencias.
+    """
+    img_exts = (".jpg", ".jpeg", ".png")
+    # 1) intentos directos en datos/{split}/{class_name}
+    for split in ["valid", "test", "train"]:
         candidate_dir = os.path.join("datos", split, class_name)
         if os.path.isdir(candidate_dir):
-            for fname in os.listdir(candidate_dir):
-                if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+            for fname in sorted(os.listdir(candidate_dir)):
+                if fname.lower().endswith(img_exts):
                     return os.path.join(candidate_dir, fname)
+
+    # 2) si la etiqueta tiene formato class_{i}, mapear al i-ésimo subdirectorio en datos/{split}
+    import re
+    m = re.match(r"class_(\d+)$", class_name)
+    if m:
+        idx = int(m.group(1))
+        for split in ["valid", "train", "test"]:
+            root = os.path.join("datos", split)
+            if os.path.isdir(root):
+                try:
+                    subs = sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
+                    if 0 <= idx < len(subs):
+                        candidate_dir = os.path.join(root, subs[idx])
+                        for fname in sorted(os.listdir(candidate_dir)):
+                            if fname.lower().endswith(img_exts):
+                                return os.path.join(candidate_dir, fname)
+                except Exception:
+                    pass
+
+    # 3) buscar en el directorio del modelo (ej.: modelos/<name>/assets, examples, reference)
+    try:
+        model_root = MODEL_PATH if 'MODEL_PATH' in globals() else None
+        if model_root:
+            for sub in ("assets", "examples", "reference", "refs", "imgs"):
+                cand = os.path.join(model_root, sub)
+                if os.path.isdir(cand):
+                    # buscar archivo que contenga el nombre de clase o el nombre común
+                    for fname in sorted(os.listdir(cand)):
+                        low = fname.lower()
+                        if low.endswith(img_exts):
+                            if class_name.lower() in low:
+                                return os.path.join(cand, fname)
+                            # también buscar por nombre común
+                            common = COMMON_NAMES.get(class_name, "").lower()
+                            if common and common in low:
+                                return os.path.join(cand, fname)
+                    # si no hay match por nombre, devolver la primera imagen como fallback
+                    for fname in sorted(os.listdir(cand)):
+                        if fname.lower().endswith(img_exts):
+                            return os.path.join(cand, fname)
+    except Exception:
+        pass
+
+    # 4) búsqueda amplia: archivos en datos/ que contengan el nombre de clase o nombre común
+    search_roots = [os.path.join("datos", p) for p in ("valid", "train", "test")] + [os.path.join("modelos", d) for d in os.listdir("modelos") if os.path.isdir(os.path.join("modelos", d))]
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, files in os.walk(root):
+            for fname in files:
+                low = fname.lower()
+                if not low.endswith(img_exts):
+                    continue
+                if class_name.lower() in low:
+                    return os.path.join(dirpath, fname)
+                common = COMMON_NAMES.get(class_name, "").lower()
+                if common and common in low:
+                    return os.path.join(dirpath, fname)
+
     return None
 
 # ============================
@@ -844,47 +914,112 @@ if nav.startswith("🔍"):
 
     # Si hubo predicción válida, construir y mostrar Top-K y detalles
     if predicted:
-            # Sugerencias Top-3
-            # Si no hay nombres de clases disponibles (archivo missing), inferimos etiquetas
-            # a partir del vector de probabilidades para evitar IndexError.
-            if classes and len(classes) > 0:
-                cls_list = classes
+        # Preparar lista de etiquetas: preferir `classes`, sino intentar cargar desde archivos
+        if classes and len(classes) > 0:
+            cls_list = classes
+            inferred_from = "model/classes file"
+        else:
+            # 1) intentar load_class_names (intenta clases al lado del modelo o dataset)
+            try:
+                inferred = load_class_names(MODEL_PATH)
+            except Exception:
+                inferred = []
+            # 2) si sigue vacío, intentar leer las carpetas en datos/valid o datos/train
+            if not inferred:
+                for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train")]:
+                    if os.path.isdir(candidate):
+                        try:
+                            inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
+                            if inferred:
+                                break
+                        except Exception:
+                            inferred = []
+            if inferred:
+                cls_list = inferred
+                inferred_from = "dataset folders (datos/)"
+                st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
             else:
-                # construir etiquetas genéricas class_0, class_1, ... según la dimensión de probs
+                # último recurso: construir etiquetas genéricas class_0, class_1, ... según la dimensión de probs
                 try:
                     n_out = int(probs.shape[-1])
                 except Exception:
-                    n_out = probs.size if hasattr(probs, 'size') else 0
+                    n_out = int(getattr(probs, 'size', 0))
                 cls_list = [f"class_{i}" for i in range(n_out)]
-                st.warning("No se encontraron nombres de clases al lado del modelo; usando etiquetas inferidas (class_0, class_1, ...).")
+                inferred_from = "generated labels"
+                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
-            suggest_k = min(3, len(cls_list))
+    # Sugerencias Top-3
+    # Defensive: asegurar que `probs` y `cls_list` existen antes de indexar
+    if ('probs' not in locals()) or (probs is None):
+        probs = np.array([])
+
+    # Asegurar que cls_list existe y no está vacío. Si está vacío, intentar inferir desde archivos
+    if ('cls_list' not in locals()) or (not cls_list):
+        try:
+            inferred = load_class_names(MODEL_PATH)
+        except Exception:
+            inferred = []
+        if not inferred:
+            for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train"), os.path.join("datos", "test")]:
+                if os.path.isdir(candidate):
+                    try:
+                        inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
+                        if inferred:
+                            break
+                    except Exception:
+                        inferred = []
+        if inferred:
+            cls_list = inferred
+            inferred_from = "dataset folders (datos/)"
+            st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
+        else:
+            # último recurso: generar etiquetas desde la dimensión de probs
             try:
-                top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
+                n_out = int(probs.shape[-1])
             except Exception:
-                top_idx_sorted = np.arange(min(suggest_k, len(cls_list)))
-            default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
-            default_class = cls_list[default_idx]
-            default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
+                try:
+                    n_out = int(np.asarray(probs).size)
+                except Exception:
+                    n_out = 0
+            if n_out <= 0:
+                cls_list = []
+            else:
+                cls_list = [f"class_{i}" for i in range(n_out)]
+                inferred_from = "generated labels"
+                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
-        # Construir opciones legibles
-        options = []
-        idx_map = {}
-        for idx in top_idx_sorted:
-            sci = cls_list[int(idx)]
-            com = COMMON_NAMES.get(sci, sci)
-            label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
-            options.append(label)
-            idx_map[label] = int(idx)
+    # Sugerencias Top-3 y cálculo de índices, filtrando índices fuera de rango
+    suggest_k = min(3, max(0, len(cls_list)))
+    try:
+        raw_idx = np.argsort(probs)[-suggest_k:][::-1] if suggest_k > 0 else np.array([], dtype=int)
+    except Exception:
+        raw_idx = np.arange(min(suggest_k, len(cls_list))) if suggest_k > 0 else np.array([], dtype=int)
+
+    # Filtrar índices que excedan el tamaño de cls_list o de probs
+    top_idx_sorted = [int(i) for i in raw_idx if (int(i) < len(cls_list) and int(i) < np.asarray(probs).size)]
+    if not top_idx_sorted:
+        # fallback: usar primeros elementos válidos
+        top_idx_sorted = list(range(min(len(cls_list), int(np.asarray(probs).size))))
+    default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
+    # Proteger acceso si cls_list está vacío
+    default_class = cls_list[default_idx] if len(cls_list) > default_idx else f"class_{default_idx}"
+    default_conf = float(probs[default_idx]) if np.asarray(probs).size > default_idx else 0.0
+
+    # Construir opciones legibles
+    options = []
+    idx_map = {}
+    for idx in top_idx_sorted:
+        sci = cls_list[int(idx)]
+        com = COMMON_NAMES.get(sci, sci)
+        label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
+        options.append(label)
+        idx_map[label] = int(idx)
 
         with c2:
-            # Mostrar la sugerencia principal como métrica
             st.metric("Predicción sugerida", COMMON_NAMES.get(default_class, default_class))
             st.metric("Confianza", f"{default_conf*100:.2f}%")
             st.markdown("### Opciones Top-3")
-            # Mostrar imágenes de las opciones Top-3 (para ayudar a elegir visualmente)
             cols = st.columns(suggest_k)
-            # Sincronización selección (por botón o por radio)
             sel_key = f"sel_idx_pred_{model_name}"
             selected_idx = st.session_state.get(sel_key, default_idx)
             for j, idx in enumerate(top_idx_sorted):
@@ -897,11 +1032,10 @@ if nav.startswith("🔍"):
                         st.image(ref, caption=f"{com} — {probs[idx]*100:.1f}%", use_container_width=True)
                     else:
                         st.caption(f"{com} — {probs[idx]*100:.1f}% (sin imagen de referencia)")
-                    # Botón para seleccionar por imagen
-                    if st.button("Elegir", key=f"btn_choose_{model_name}_{int(idx)}"):
-                        st.session_state[sel_key] = int(idx)
-                        selected_idx = int(idx)
-            # Permitir elegir entre las Top-3 (radio)
+                # usar `j` en la clave para evitar claves duplicadas cuando `idx` pueda repetirse
+                if st.button("Elegir", key=f"btn_choose_{model_name}_{j}_{int(idx)}"):
+                st.session_state[sel_key] = int(idx)
+                selected_idx = int(idx)
             try:
                 default_radio_index = list(top_idx_sorted).index(selected_idx)
             except ValueError:
@@ -914,7 +1048,6 @@ if nav.startswith("🔍"):
             sel_common = COMMON_NAMES.get(sel_class, sel_class)
             sel_conf = float(probs[int(sel_idx)])
 
-            # Mostrar detalles para la selección
             st.write(f"Nombre científico: **{sel_class}**")
             st.write(f"Nombre común: **{sel_common}**")
             desc = DESCRIPCIONES.get(sel_class, "Descripción no disponible.")
@@ -925,8 +1058,12 @@ if nav.startswith("🔍"):
             ref_path = find_reference_image(sel_class)
             if ref_path:
                 st.image(ref_path, caption=f"Ejemplo de {sel_class}", use_container_width=True)
-        # Top-K gráfico
-        k = min(top_k, len(classes))
+
+        # Top-K gráfico: si estamos usando etiquetas inferidas/desde dataset, preferimos mostrar Top-3
+        if inferred_from != "model/classes file":
+            k = min(3, len(cls_list))
+        else:
+            k = min(top_k, len(cls_list))
         top_k_idx = np.argsort(probs)[-k:][::-1]
         top_labels = [COMMON_NAMES.get(cls_list[int(i)], cls_list[int(i)]) for i in top_k_idx]
         top_df = pd.DataFrame({

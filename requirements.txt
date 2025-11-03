@@ -8,8 +8,9 @@ scikit-learn
 Pillow
 
 # Pinned heavy ML packages - use Python 3.10 on the host
-tensorflow==2.17.1
-pennylane==0.41.0
+# TensorFlow 2.20 has wheels for Python 3.13+ on manylinux; use that to match Streamlit Cloud's Python 3.13 runtime.
+# We remove PennyLane here because we're only using classical models in the Cloud deploy.
+tensorflow==2.20.0
 ml-dtypes>=0.5.1,<1.0.0
 # If your model requires jax/jaxlib, install compatible versions for CPU:
 # jax==0.4.26

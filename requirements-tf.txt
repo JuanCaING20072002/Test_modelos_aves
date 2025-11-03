@@ -1,0 +1,21 @@
+# Requirements file for deploying with TensorFlow + PennyLane (target: Python 3.10)
+streamlit
+numpy
+pandas
+matplotlib
+seaborn
+scikit-learn
+Pillow
+
+# Pinned heavy ML packages - use Python 3.10 on the host
+tensorflow==2.17.1
+pennylane==0.41.0
+ml-dtypes>=0.5.1,<1.0.0
+# If your model requires jax/jaxlib, install compatible versions for CPU:
+# jax==0.4.26
+# jaxlib==0.4.26
+
+# Notes:
+# - Streamlit Cloud may still fail to build these wheels depending on the
+#   platform's available Python version and system libs. For reliable hosting,
+#   prefer a Docker-based deploy (Cloud Run, Render with Docker, etc.).
