@@ -972,7 +972,19 @@ else:
         progress.empty()
 
         df_cmp = pd.DataFrame(rows)
-        st.dataframe(df_cmp.style.format({"Accuracy": "{:.2%}", "Top-3": "{:.2%}"}), use_container_width=True)
+        # Asegurar que las columnas numéricas sean numéricas (None -> NaN)
+        for col in ("Accuracy", "Top-3"):
+            if col in df_cmp.columns:
+                df_cmp[col] = pd.to_numeric(df_cmp[col], errors="coerce")
+
+        # Crear una versión segura para mostrar (convertir NaN a 'N/A' y formatear porcentajes)
+        df_display = df_cmp.copy()
+        if "Accuracy" in df_display.columns:
+            df_display["Accuracy"] = df_display["Accuracy"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
+        if "Top-3" in df_display.columns:
+            df_display["Top-3"] = df_display["Top-3"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
+
+        st.dataframe(df_display, use_container_width=True)
         # Gráfico de barras de accuracy
         chart_df = df_cmp.set_index("Modelo")["Accuracy"]
         st.bar_chart(chart_df)
