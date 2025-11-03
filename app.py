@@ -950,23 +950,23 @@ if nav.startswith("🔍"):
 
     # Sugerencias Top-3
     suggest_k = min(3, len(cls_list))
-        try:
-            top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
-        except Exception:
-            top_idx_sorted = np.arange(min(suggest_k, len(cls_list)))
-        default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
-        default_class = cls_list[default_idx]
-        default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
+    try:
+        top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
+    except Exception:
+        top_idx_sorted = np.arange(min(suggest_k, len(cls_list)))
+    default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
+    default_class = cls_list[default_idx]
+    default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
 
-        # Construir opciones legibles
-        options = []
-        idx_map = {}
-        for idx in top_idx_sorted:
-            sci = cls_list[int(idx)]
-            com = COMMON_NAMES.get(sci, sci)
-            label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
-            options.append(label)
-            idx_map[label] = int(idx)
+    # Construir opciones legibles
+    options = []
+    idx_map = {}
+    for idx in top_idx_sorted:
+        sci = cls_list[int(idx)]
+        com = COMMON_NAMES.get(sci, sci)
+        label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
+        options.append(label)
+        idx_map[label] = int(idx)
 
         with c2:
             st.metric("Predicción sugerida", COMMON_NAMES.get(default_class, default_class))
