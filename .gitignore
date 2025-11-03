@@ -21,7 +21,6 @@ ml_env/
 Thumbs.db
 
 # Data / large raw files (don't commit datasets)
-datos/
 *.csv
 *.zip
 
