@@ -11,6 +11,21 @@ import tensorflow as tf
 from keras.utils import load_img, img_to_array, image_dataset_from_directory
 from keras.applications.vgg16 import preprocess_input as vgg16_preprocess
 
+# --- Lazy imports for heavy ML libs (allow deploy without TF/JAX/PennyLane) ---
+HAS_TF = True
+HAS_PENNYLANE = True
+try:
+    import tensorflow as _tf
+    HAS_TF = True
+except Exception:
+    HAS_TF = False
+
+try:
+    import pennylane as _qml
+    HAS_PENNYLANE = True
+except Exception:
+    HAS_PENNYLANE = False
+
 # ============================
 # Configuración inicial
 # ============================
@@ -36,6 +51,8 @@ def load_model_generic(path: str):
     """
     # SavedModel directory -> TFSMLayer (inferencia vía signature)
     if os.path.isdir(path) and os.path.isfile(os.path.join(path, "saved_model.pb")):
+        if not HAS_TF:
+            raise RuntimeError("TensorFlow no está disponible en este despliegue. Cargue el modelo localmente en `.venv310` para usar SavedModel.")
         return TFSMLayer(path, call_endpoint="serving_default")
 
     # Keras file (.keras, .h5) -> tf.keras.models.load_model
@@ -49,6 +66,8 @@ def load_model_generic(path: str):
         # Si pennylane está instalado, intentaremos primero una carga normal; si falla
         # por faltar el argumento `qnode`, construiremos un loader que recree un
         # qnode razonable y volvamos a intentar con `custom_objects`.
+        if not HAS_TF:
+            raise RuntimeError("TensorFlow no está disponible en este despliegue. Cargue el modelo localmente en `.venv310` para usar archivos .keras.")
         try:
             try:
                 import pennylane as qml
@@ -87,32 +106,104 @@ def load_model_generic(path: str):
                                 output_dim = config.get("output_dim", None)
                                 ws = None
                                 try:
-                                    ws = config.get("weight_shapes", {}).get("weights")
+                                    # Algunos serializados ponen estructuras varias en weight_shapes
+                                    if isinstance(weight_shapes, dict):
+                                        ws = weight_shapes.get("weights") or weight_shapes
+                                    else:
+                                        ws = weight_shapes
                                 except Exception:
-                                    ws = None
+                                    ws = weight_shapes
 
-                                n_qubits = 4
-                                if isinstance(ws, (list, tuple)) and len(ws) >= 2:
+                                # heurística para n_qubits: preferir inferir de output_dim si es potencia de 2
+                                import math
+
+                                def is_power_of_two(n):
+                                    return n > 0 and (n & (n - 1)) == 0
+
+                                n_qubits = None
+                                if output_dim is not None:
                                     try:
-                                        # heurística: [n_layers, n_qubits, param_dim]
-                                        n_qubits = int(ws[1])
+                                        od = int(output_dim)
+                                        if is_power_of_two(od):
+                                            n_qubits = int(math.log2(od))
                                     except Exception:
-                                        pass
+                                        n_qubits = None
+
+                                # Si no deducido, intentar heurística desde weight_shapes
+                                if n_qubits is None:
+                                    n_qubits = 4
+                                    if isinstance(ws, (list, tuple)) and len(ws) >= 2:
+                                        try:
+                                            # heurística antigua: ws[1] era n_qubits en algunos modelos
+                                            candidate = int(ws[1])
+                                            if 1 <= candidate <= 16:
+                                                n_qubits = candidate
+                                        except Exception:
+                                            pass
 
                                 dev = _qml.device("default.qubit", wires=n_qubits)
 
-                                def circuit(inputs, weights):
-                                    _qml.templates.AngleEmbedding(inputs, wires=range(n_qubits))
+                                # Construir circuito en función de output_dim:
+                                # - Si output_dim es potencia de 2 y coincide con 2**n_qubits -> devolver probs
+                                # - Si output_dim es pequeño y no potencia de 2 -> devolver expectativas (PauliZ)
+                                def circuit_probs(inputs, weights):
+                                    # Evitar AngleEmbedding (validaciones estrictas de features).
+                                    # Hacemos un embedding simple: aplicar RY con entradas a cada qubit
+                                    L = int(getattr(inputs, "shape", (len(inputs),))[-1]) if hasattr(inputs, "shape") else len(inputs)
+                                    for j in range(n_qubits):
+                                        idx = j % L
+                                        _qml.RY(inputs[idx], wires=j)
                                     _qml.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
-                                    # Devolvemos probabilidades por defecto (heurística)
                                     return _qml.probs(wires=list(range(n_qubits)))
 
-                                qnode = _qml.QNode(circuit, dev, interface="tf")
+                                def circuit_expvals(inputs, weights, n_out):
+                                    # Embedding manual: map elementos de inputs a qubits por rotaciones RY
+                                    L = int(getattr(inputs, "shape", (len(inputs),))[-1]) if hasattr(inputs, "shape") else len(inputs)
+                                    for j in range(n_qubits):
+                                        idx = j % L
+                                        _qml.RY(inputs[idx], wires=j)
+                                    _qml.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+                                    res = []
+                                    for i in range(n_out):
+                                        wire = i % n_qubits
+                                        res.append(_qml.expval(_qml.PauliZ(wire)))
+                                    return tuple(res) if len(res) > 1 else res[0]
 
+                                # Elegir tipo de medición
+                                use_probs = False
+                                if output_dim is not None:
+                                    try:
+                                        od = int(output_dim)
+                                        if is_power_of_two(od) and 2 ** n_qubits == od:
+                                            use_probs = True
+                                        else:
+                                            use_probs = False
+                                    except Exception:
+                                        use_probs = False
+                                else:
+                                    # sin output_dim asumimos probs (común en ejemplos)
+                                    use_probs = True
+
+                                if use_probs:
+                                    qnode = _qml.QNode(circuit_probs, dev, interface="tf")
+                                else:
+                                    # cuando usamos expvals debemos envolver para devolver vector
+                                    def qfunc(inputs, weights):
+                                        return circuit_expvals(inputs, weights, output_dim or n_qubits)
+
+                                    qnode = _qml.QNode(qfunc, dev, interface="tf")
+
+                                # Crear KerasLayer pasando weight_shapes y output_dim si es posible
                                 try:
-                                    return _PLKerasLayer(qnode, weight_shapes=weight_shapes, output_dim=output_dim)
+                                    if output_dim is not None:
+                                        return _PLKerasLayer(qnode, weight_shapes=weight_shapes, output_dim=output_dim)
+                                    else:
+                                        return _PLKerasLayer(qnode, weight_shapes=weight_shapes)
                                 except Exception:
-                                    return _PLKerasLayer(qnode, weight_shapes=weight_shapes)
+                                    # último recurso: crear sin weight_shapes
+                                    if output_dim is not None:
+                                        return _PLKerasLayer(qnode, output_dim=output_dim)
+                                    return _PLKerasLayer(qnode)
 
                         return KerasLayerFallback
                     except Exception:
@@ -128,6 +219,97 @@ def load_model_generic(path: str):
                     custom["pennylane.qnn.keras.KerasLayer"] = PLKerasLayer
 
                 model = keras.models.load_model(path, compile=False, custom_objects=custom if custom else None)
+                # Si el modelo contiene capas de PennyLane (KerasLayer) que usan embeddings
+                # originales (AngleEmbedding), reemplazamos su qnode por una versión
+                # que usa embedding manual (RY) para evitar errores de longitud de features.
+                try:
+                    import pennylane as _qml2
+                    from pennylane.qnn.keras import KerasLayer as _PLKerasLayer2
+
+                    def rebuild_qnode_for_layer(layer):
+                        try:
+                            cfg = layer.get_config() or {}
+                        except Exception:
+                            cfg = {}
+                        weight_shapes = cfg.get("weight_shapes", None)
+                        output_dim = cfg.get("output_dim", None)
+
+                        # heurística n_qubits
+                        import math
+
+                        def is_power_of_two(n):
+                            return n > 0 and (n & (n - 1)) == 0
+
+                        n_qubits = None
+                        if output_dim is not None:
+                            try:
+                                od = int(output_dim)
+                                if is_power_of_two(od):
+                                    n_qubits = int(math.log2(od))
+                            except Exception:
+                                n_qubits = None
+
+                        if n_qubits is None:
+                            n_qubits = 4
+                            try:
+                                ws = weight_shapes
+                                if isinstance(ws, dict):
+                                    ws = ws.get("weights") or ws
+                                if isinstance(ws, (list, tuple)) and len(ws) >= 2:
+                                    cand = int(ws[1])
+                                    if 1 <= cand <= 32:
+                                        n_qubits = cand
+                            except Exception:
+                                pass
+
+                        dev = _qml2.device("default.qubit", wires=n_qubits)
+
+                        def q_embed_ry(inputs, weights):
+                            L = int(getattr(inputs, "shape", (len(inputs),))[-1]) if hasattr(inputs, "shape") else len(inputs)
+                            for j in range(n_qubits):
+                                idx = j % L
+                                _qml2.RY(inputs[idx], wires=j)
+                            _qml2.templates.StronglyEntanglingLayers(weights, wires=range(n_qubits))
+                            # devolver probs si coincide con potencia de dos
+                            if output_dim is not None:
+                                try:
+                                    od = int(output_dim)
+                                    if is_power_of_two(od) and 2 ** n_qubits == od:
+                                        return _qml2.probs(wires=list(range(n_qubits)))
+                                except Exception:
+                                    pass
+                            # por defecto devolver expectativas PauliZ hasta output_dim
+                            n_out = int(output_dim) if output_dim is not None else n_qubits
+                            res = []
+                            for i in range(n_out):
+                                res.append(_qml2.expval(_qml2.PauliZ(i % n_qubits)))
+                            return tuple(res) if len(res) > 1 else res[0]
+
+                        qnode = _qml2.QNode(q_embed_ry, dev, interface="tf")
+                        try:
+                            # intentar reemplazar el qnode del layer
+                            layer.qnode = qnode
+                            try:
+                                layer._qnode = qnode
+                            except Exception:
+                                pass
+                            return True
+                        except Exception:
+                            return False
+
+                    # Aplicar sobre todas las capas si el modelo es un tf.keras.Model
+                    if hasattr(model, "layers"):
+                        for lyr in model.layers:
+                            try:
+                                if isinstance(lyr, _PLKerasLayer2):
+                                    rebuild_qnode_for_layer(lyr)
+                            except Exception:
+                                # ignorar capas que no se puedan procesar
+                                pass
+                except Exception:
+                    # Si pennylane no está disponible o ocurre error, continuar sin parche
+                    pass
+
                 return model
         except Exception as e:
             # Mejor mensaje de error para el usuario: indicar que puede necesitar pennylane
@@ -143,15 +325,87 @@ def load_model_generic(path: str):
 # Datasets y utilidades
 # ============================
 
-def get_dataset(split: str = "valid"):
+def get_dataset(split: str = "valid", img_size=IMG_SIZE):
     directory = os.path.join("datos", split)
     ds = image_dataset_from_directory(
         directory,
-        image_size=IMG_SIZE,
+        image_size=img_size,
         batch_size=BATCH_SIZE,
         shuffle=False,
     )
     return ds
+
+
+def get_model_diagnostics(model):
+    """Recolectar información útil sobre el modelo y sus capas para depuración.
+    Devuelve una lista de dicts con: name, class, input_shape, output_shape, extra (config/qnode info).
+    """
+    diagnostics = []
+    try:
+        from tensorflow.keras.models import Model
+    except Exception:
+        Model = None
+
+    def _shape_to_list(s):
+        try:
+            if hasattr(s, "as_list"):
+                return s.as_list()
+            return tuple(int(x) if x is not None else None for x in s)
+        except Exception:
+            return str(s)
+
+    if hasattr(model, "layers"):
+        for lyr in getattr(model, "layers", []):
+            info = {
+                "name": getattr(lyr, "name", str(type(lyr))),
+                "class": type(lyr).__name__,
+                "input_shape": None,
+                "output_shape": None,
+                "extra": {},
+            }
+            try:
+                if hasattr(lyr, "input_shape"):
+                    info["input_shape"] = _shape_to_list(lyr.input_shape)
+                elif hasattr(lyr, "input_spec") and getattr(lyr, "input_spec") is not None:
+                    spec = lyr.input_spec
+                    if isinstance(spec, (list, tuple)):
+                        spec = spec[0]
+                    if hasattr(spec, "shape"):
+                        info["input_shape"] = _shape_to_list(spec.shape)
+            except Exception:
+                pass
+            try:
+                if hasattr(lyr, "output_shape"):
+                    info["output_shape"] = _shape_to_list(lyr.output_shape)
+            except Exception:
+                pass
+
+            # Si es una KerasLayer de PennyLane, añadir config y qnode_weights
+            try:
+                modname = type(lyr).__module__
+                clsname = type(lyr).__name__
+                if "pennylane" in modname or clsname.lower().find("keraslayer") >= 0:
+                    try:
+                        cfg = lyr.get_config()
+                        info["extra"]["config"] = cfg
+                    except Exception:
+                        info["extra"]["config"] = "<no get_config()>"
+                    try:
+                        qw = getattr(lyr, "qnode_weights", None)
+                        if isinstance(qw, dict):
+                            info["extra"]["qnode_weights"] = {k: getattr(v, "shape", str(type(v))) for k, v in qw.items()}
+                        else:
+                            info["extra"]["qnode_weights"] = str(type(qw))
+                    except Exception:
+                        info["extra"]["qnode_weights"] = "<error>"
+            except Exception:
+                pass
+
+            diagnostics.append(info)
+    else:
+        diagnostics.append({"model": str(type(model)), "note": "No layers attribute"})
+
+    return diagnostics
 
 # Función para cargar nombres de clases
 def list_available_models():
@@ -238,8 +492,10 @@ COMMON_NAMES = {
 }
 
 # Funcion para preprocesar imagen según método
-def preprocess_image(file_like, method: str) -> np.ndarray:
-    img = load_img(file_like, target_size=IMG_SIZE)
+def preprocess_image(file_like, method: str, img_size=None) -> np.ndarray:
+    if img_size is None:
+        img_size = IMG_SIZE
+    img = load_img(file_like, target_size=img_size)
     arr = img_to_array(img)
     if method == "VGG16":
         x = np.expand_dims(arr, axis=0)
@@ -248,15 +504,59 @@ def preprocess_image(file_like, method: str) -> np.ndarray:
         x = np.expand_dims(arr / 255.0, axis=0)
     return x
 # Preprocesar dataset según método
-def preprocess_dataset(ds, method: str):
+def preprocess_dataset(ds, method: str, img_size=None):
+    if img_size is None:
+        img_size = IMG_SIZE
     if method == "VGG16":
         def _map(x, y):
             x2 = tf.numpy_function(lambda z: vgg16_preprocess(z), [x], tf.float32)
-            x2.set_shape((None, IMG_SIZE[0], IMG_SIZE[1], 3))
+            x2.set_shape((None, img_size[0], img_size[1], 3))
             return x2, y
         return ds.map(_map)
     else:
         return ds.map(lambda x, y: (tf.cast(x, tf.float32) / 255.0, y))
+
+
+def infer_model_image_size(model):
+    """Intentar inferir (H, W) desde un modelo/objeto invocable.
+    - Para tf.keras.Model, usa input_shape o inputs.
+    - Para TFSMLayer o capas personalizadas, intenta buscar input_spec.
+    Si no puede inferir, devuelve el valor por defecto IMG_SIZE.
+    """
+    try:
+        shape = None
+        # Keras Model
+        if hasattr(model, "input_shape") and model.input_shape is not None:
+            shape = model.input_shape
+        elif hasattr(model, "inputs") and getattr(model, "inputs"):
+            shape = model.inputs[0].shape
+        # TFSMLayer y otros: intentar input_spec
+        elif hasattr(model, "input_spec"):
+            spec = getattr(model, "input_spec")
+            if isinstance(spec, (list, tuple)):
+                spec = spec[0]
+            if hasattr(spec, "shape"):
+                shape = spec.shape
+
+        if shape is None:
+            return IMG_SIZE
+
+        # Normalizar a tupla de ints/None
+        if hasattr(shape, "as_list"):
+            shape_tuple = tuple(None if x is None else int(x) for x in shape.as_list())
+        else:
+            shape_tuple = tuple(shape)
+
+        # Buscar H,W en la tupla. Soporta formatos (None,H,W,C) o (H,W,C) o (...,H,W,C)
+        if len(shape_tuple) >= 3:
+            # preferir los últimos 3 elementos
+            H = shape_tuple[-3]
+            W = shape_tuple[-2]
+            if isinstance(H, int) and isinstance(W, int):
+                return (H, W)
+    except Exception:
+        pass
+    return IMG_SIZE
 # Predecir probabilidades y asegurar formato
 def predict_proba(x: np.ndarray) -> np.ndarray:
     preds = model(x)
@@ -314,8 +614,13 @@ def eval_on_dataset(model_layer, ds):
 @st.cache_data(show_spinner=False)
 def evaluate_model_path(model_path: str, split: str, preprocess: str):
     mlayer = load_model_generic(model_path)
-    ds = get_dataset(split)
-    ds = preprocess_dataset(ds, preprocess)
+    # Infer model input size and use it when building the dataset / preprocessing
+    try:
+        inferred_size = infer_model_image_size(mlayer)
+    except Exception:
+        inferred_size = IMG_SIZE
+    ds = get_dataset(split, img_size=inferred_size)
+    ds = preprocess_dataset(ds, preprocess, img_size=inferred_size)
     acc, top3, y_true, y_pred, Y_pred = eval_on_dataset(mlayer, ds)
     labels = load_class_names(model_path)
     cm = confusion_matrix(y_true, y_pred)
@@ -353,6 +658,32 @@ st.sidebar.write(f"Seleccionado: `{model_name}`")
 st.sidebar.write(f"Ruta: `{MODEL_PATH}`")
 st.sidebar.write(f"Clases: {len(classes)}")
 st.sidebar.caption(f"Fuente de clases: {classes_source}")
+
+# Si no hay TensorFlow/PennyLane en este entorno, mostrar aviso claro
+if not HAS_TF or not HAS_PENNYLANE:
+    msg_lines = []
+    if not HAS_TF:
+        msg_lines.append("TensorFlow no está instalado en este despliegue; la evaluación y carga de modelos .keras/.h5 estará deshabilitada.")
+    if not HAS_PENNYLANE:
+        msg_lines.append("PennyLane no está instalado; los modelos híbridos cuánticos no se podrán ejecutar aquí.")
+    st.sidebar.warning("\n".join(msg_lines))
+
+# Diagnóstico opcional de la arquitectura y capas
+if st.sidebar.checkbox("Mostrar diagnóstico de modelo", value=False):
+    try:
+        diag = get_model_diagnostics(model)
+        with st.expander("Diagnóstico del modelo (capas)"):
+            for d in diag:
+                st.write("—" * 40)
+                st.write(f"Nombre: {d.get('name')}")
+                st.write(f"Tipo: {d.get('class')}")
+                st.write(f"input_shape: {d.get('input_shape')}")
+                st.write(f"output_shape: {d.get('output_shape')}")
+                if d.get("extra"):
+                    st.write("Extra:")
+                    st.json(d.get("extra"))
+    except Exception as e:
+        st.warning(f"No se pudo generar el diagnóstico: {e}")
 
 if nav.startswith("🔍"):
     # Controles de predicción
