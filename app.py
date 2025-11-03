@@ -949,6 +949,10 @@ if nav.startswith("🔍"):
                 st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
     # Sugerencias Top-3
+    # Defensive: asegurar que `probs` y `cls_list` existen antes de indexar
+    if ('probs' not in locals()) or (probs is None):
+        probs = np.array([])
+
     # Asegurar que cls_list existe y no está vacío. Si está vacío, intentar inferir desde archivos
     if ('cls_list' not in locals()) or (not cls_list):
         try:
