@@ -7,17 +7,37 @@ import seaborn as sns
 import pandas as pd
 import os
 from sklearn.metrics import confusion_matrix, classification_report
-import tensorflow as tf
-from keras.utils import load_img, img_to_array, image_dataset_from_directory
-from keras.applications.vgg16 import preprocess_input as vgg16_preprocess
 
 # --- Lazy imports for heavy ML libs (allow deploy without TF/JAX/PennyLane) ---
 HAS_TF = True
 HAS_PENNYLANE = True
+# Placeholders for symbols that normally come from TF/Keras
+tf = None
+load_img = None
+img_to_array = None
+image_dataset_from_directory = None
+vgg16_preprocess = None
 try:
-    import tensorflow as _tf
+    import tensorflow as tf
+    # Import Keras helpers from tensorflow.keras inside the try so missing TF
+    # doesn't crash the app at import time on Streamlit Cloud when requirements
+    # omit heavy ML packages.
+    try:
+        from tensorflow.keras.utils import load_img, img_to_array, image_dataset_from_directory
+        from tensorflow.keras.applications.vgg16 import preprocess_input as vgg16_preprocess
+    except Exception:
+        # If keras helpers aren't available, keep placeholders as None
+        load_img = None
+        img_to_array = None
+        image_dataset_from_directory = None
+        vgg16_preprocess = None
     HAS_TF = True
 except Exception:
+    tf = None
+    load_img = None
+    img_to_array = None
+    image_dataset_from_directory = None
+    vgg16_preprocess = None
     HAS_TF = False
 
 try:
@@ -25,6 +45,9 @@ try:
     HAS_PENNYLANE = True
 except Exception:
     HAS_PENNYLANE = False
+
+# NOTE: touch for deploy/no-tf - ensure Streamlit Cloud picks up latest commit
+# deploy-touch: 2025-11-02 21:10:22 -0500
 
 # ============================
 # Configuración inicial
@@ -41,7 +64,6 @@ IMG_SIZE = (224, 224)  # Forma esperada por VGG16
 # Cargar modelo entrenado
 # ============================
 # Cargar modelo entrenado (SavedModel) usando Keras 3
-from keras.layers import TFSMLayer
 
 
 @st.cache_resource(show_spinner=False)
@@ -53,6 +75,15 @@ def load_model_generic(path: str):
     if os.path.isdir(path) and os.path.isfile(os.path.join(path, "saved_model.pb")):
         if not HAS_TF:
             raise RuntimeError("TensorFlow no está disponible en este despliegue. Cargue el modelo localmente en `.venv310` para usar SavedModel.")
+        # Importar TFSMLayer localmente para evitar error en entornos sin TF
+        try:
+            from keras.layers import TFSMLayer
+        except Exception:
+            try:
+                # Alternativa: tensorflow.keras.layers (si aplica)
+                from tensorflow.keras.layers import TFSMLayer
+            except Exception:
+                raise RuntimeError("TFSMLayer no está disponible en este entorno. No se puede cargar SavedModel.")
         return TFSMLayer(path, call_endpoint="serving_default")
 
     # Keras file (.keras, .h5) -> tf.keras.models.load_model
@@ -327,6 +358,8 @@ def load_model_generic(path: str):
 
 def get_dataset(split: str = "valid", img_size=IMG_SIZE):
     directory = os.path.join("datos", split)
+    if image_dataset_from_directory is None:
+        raise RuntimeError("Función image_dataset_from_directory no disponible: TensorFlow no está instalado en este despliegue.")
     ds = image_dataset_from_directory(
         directory,
         image_size=img_size,
@@ -453,10 +486,17 @@ def load_class_names(model_path: str):
             except Exception:
                 pass
     # 2) Fallback: usar clases del dataset de validación , si existe    
-    _tmp_ds = image_dataset_from_directory(
-        os.path.join("datos", "valid"), image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=False
-    )
-    return list(_tmp_ds.class_names)
+    # Sólo intentar crear un dataset si la función está disponible (TF presente)
+    if image_dataset_from_directory is not None:
+        try:
+            _tmp_ds = image_dataset_from_directory(
+                os.path.join("datos", "valid"), image_size=IMG_SIZE, batch_size=BATCH_SIZE, shuffle=False
+            )
+            return list(_tmp_ds.class_names)
+        except Exception:
+            pass
+    # Si no se puede inferir desde dataset, devolver lista vacía para no romper la UI
+    return []
 
 AVAILABLE_MODELS = list_available_models()
 if not AVAILABLE_MODELS:
@@ -648,11 +688,50 @@ st.sidebar.subheader("Acerca del modelo")
 # Selector de modelo
 model_name = st.sidebar.selectbox("Modelo", options=list(AVAILABLE_MODELS.keys()), index=0)
 MODEL_PATH = AVAILABLE_MODELS[model_name]
-model = load_model_generic(MODEL_PATH)
-classes = load_class_names(MODEL_PATH)
+model = None
+classes = []
+classes_source = "desconocida"
+if HAS_TF:
+    try:
+        model = load_model_generic(MODEL_PATH)
+    except Exception as e:
+        st.sidebar.error(f"No se pudo cargar el modelo: {e}")
+        model = None
+    try:
+        classes = load_class_names(MODEL_PATH)
+    except Exception:
+        classes = []
+else:
+    # Sin TensorFlow no podemos cargar el modelo; intentar leer clases desde archivo si existe
+    try:
+        # Intentar cargar clases desde archivos al lado del modelo (sin TF)
+        candidates = [
+            os.path.join(MODEL_PATH, "classes.txt"),
+            os.path.join(MODEL_PATH, "labels.txt"),
+            os.path.join(MODEL_PATH, "class_indices.json"),
+        ]
+        for path in candidates:
+            if os.path.isfile(path):
+                if path.endswith('.json'):
+                    import json
+                    with open(path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        classes = [k for k, _ in sorted(data.items(), key=lambda kv: kv[1])]
+                    elif isinstance(data, list):
+                        classes = data
+                    break
+                else:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        lines = [ln.strip() for ln in f if ln.strip()]
+                    if lines:
+                        classes = lines
+                        break
+    except Exception:
+        classes = []
 classes_source = "archivo del modelo" if any(
     os.path.isfile(os.path.join(MODEL_PATH, name)) for name in ["classes.txt", "labels.txt", "class_indices.json"]
-) else "dataset"
+) else ("dataset" if classes else "desconocida")
 
 st.sidebar.write(f"Seleccionado: `{model_name}`")
 st.sidebar.write(f"Ruta: `{MODEL_PATH}`")
@@ -690,17 +769,21 @@ if nav.startswith("🔍"):
     st.sidebar.markdown("---")
     st.sidebar.subheader("Opciones de predicción")
     prep_method = st.sidebar.selectbox("Preprocesamiento", ["x/255", "VGG16"], index=0)
-    top_k = st.sidebar.slider("Top-K", min_value=3, max_value=min(10, len(classes)), value=min(5, len(classes)))
+    num_classes = max(1, len(classes))
+    top_k = st.sidebar.slider("Top-K", min_value=1, max_value=min(10, num_classes), value=min(5, num_classes))
     show_ref = st.sidebar.checkbox("Mostrar imagen de referencia", value=True)
 
     st.subheader("Sube una imagen de un ave")
     up = st.file_uploader("Elige una imagen (JPG/PNG)", type=["jpg", "jpeg", "png"])
     if up is not None:
-        c1, c2 = st.columns([1, 1])
-        with c1:
-            st.image(up, caption="Imagen cargada", use_container_width=True)
-        x = preprocess_image(up, prep_method)
-        probs = predict_proba(x)[0]
+        if not HAS_TF or load_img is None:
+            st.error("TensorFlow/Keras no están disponibles en este despliegue; no se pueden realizar predicciones aquí. Cargue el modelo localmente o despliegue en un runtime compatible.")
+        else:
+            c1, c2 = st.columns([1, 1])
+            with c1:
+                st.image(up, caption="Imagen cargada", use_container_width=True)
+            x = preprocess_image(up, prep_method)
+            probs = predict_proba(x)[0]
         # Sugerencias Top-3
         suggest_k = min(3, len(classes))
         top_idx_sorted = probs.argsort()[-suggest_k:][::-1]
@@ -788,8 +871,11 @@ else:
     # establecer sección de evaluación
     st.subheader("Evaluación del modelo")
     if eval_button:
-        ds = get_dataset(split)
-        ds = preprocess_dataset(ds, prep_method_eval)
+        if not HAS_TF:
+            st.error("TensorFlow no está disponible; la evaluación está deshabilitada en este despliegue.")
+        else:
+            ds = get_dataset(split)
+            ds = preprocess_dataset(ds, prep_method_eval)
         labels = classes
         Y_true, Y_pred = [], []
         progress = st.progress(0, text="Calculando predicciones...")
@@ -861,13 +947,17 @@ else:
         eval_results = {}
         for idx, mname in enumerate(compare_models):
             mpath = AVAILABLE_MODELS[mname]
-            res = evaluate_model_path(mpath, split, prep_method_eval)
+            if not HAS_TF:
+                st.error("TensorFlow no está disponible; no se puede evaluar modelos en este despliegue.")
+                res = None
+            else:
+                res = evaluate_model_path(mpath, split, prep_method_eval)
             eval_results[mname] = res
             rows.append({
                 "Modelo": mname,
-                "Accuracy": res["acc"],
-                "Top-3": res["top3"],
-                "Imágenes": len(res["y_true"]),
+                "Accuracy": res["acc"] if res is not None else None,
+                "Top-3": res["top3"] if res is not None else None,
+                "Imágenes": len(res["y_true"]) if res is not None else 0,
             })
             progress.progress((idx + 1) / n_models)
         progress.empty()
@@ -882,6 +972,9 @@ else:
         st.markdown("### Detalle por modelo")
         for mname in compare_models:
             res = eval_results[mname]
+            if res is None:
+                st.warning(f"No hay resultados para {mname} (TensorFlow no disponible en este despliegue).")
+                continue
             labels_m = res["labels"]
             y_true_m = res["y_true"]
             y_pred_m = res["y_pred"]
