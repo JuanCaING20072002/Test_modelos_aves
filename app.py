@@ -769,8 +769,17 @@ if nav.startswith("🔍"):
     st.sidebar.markdown("---")
     st.sidebar.subheader("Opciones de predicción")
     prep_method = st.sidebar.selectbox("Preprocesamiento", ["x/255", "VGG16"], index=0)
-    num_classes = max(1, len(classes))
-    top_k = st.sidebar.slider("Top-K", min_value=1, max_value=min(10, num_classes), value=min(5, num_classes))
+    num_classes = len(classes)
+    # Si no hay suficientes clases para un slider (min == max), evitar el slider y
+    # usar un valor por defecto de 1. Esto evita StreamlitAPIException cuando
+    # num_classes <= 1 (por ejemplo en despliegues sin TF donde no se pudieron
+    # leer las clases del modelo/dataset).
+    if num_classes <= 1:
+        top_k = 1
+        st.sidebar.info("Top-K deshabilitado: menos de 2 clases disponibles.")
+    else:
+        max_k = min(10, num_classes)
+        top_k = st.sidebar.slider("Top-K", min_value=1, max_value=max_k, value=min(5, max_k))
     show_ref = st.sidebar.checkbox("Mostrar imagen de referencia", value=True)
 
     st.subheader("Sube una imagen de un ave")
@@ -963,7 +972,19 @@ else:
         progress.empty()
 
         df_cmp = pd.DataFrame(rows)
-        st.dataframe(df_cmp.style.format({"Accuracy": "{:.2%}", "Top-3": "{:.2%}"}), use_container_width=True)
+        # Asegurar que las columnas numéricas sean numéricas (None -> NaN)
+        for col in ("Accuracy", "Top-3"):
+            if col in df_cmp.columns:
+                df_cmp[col] = pd.to_numeric(df_cmp[col], errors="coerce")
+
+        # Crear una versión segura para mostrar (convertir NaN a 'N/A' y formatear porcentajes)
+        df_display = df_cmp.copy()
+        if "Accuracy" in df_display.columns:
+            df_display["Accuracy"] = df_display["Accuracy"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
+        if "Top-3" in df_display.columns:
+            df_display["Top-3"] = df_display["Top-3"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
+
+        st.dataframe(df_display, use_container_width=True)
         # Gráfico de barras de accuracy
         chart_df = df_cmp.set_index("Modelo")["Accuracy"]
         st.bar_chart(chart_df)

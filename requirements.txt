@@ -1,12 +1,4 @@
-# Requisitos para el proyecto "Test_De_Modelos"
-# Recomendación: usar Python 3.10 para garantizar compatibilidad con TensorFlow 2.17
-# Comentarios: jaxlib en Windows puede requerir instalar una wheel específica; si falla,
-# seguir las instrucciones en https://github.com/google/jax#installation
-
-streamlit
-numpy
-pandas
-matplotlib
+# Requirements file for deploying with TensorFlow + PennyLane (target: Python 3.10)
 streamlit
 numpy
 pandas
@@ -15,11 +7,15 @@ seaborn
 scikit-learn
 Pillow
 
-# Heavy ML packages intentionally commented out for this deploy branch
-# tensorflow==2.20.0
-# tensorflow-io==0.37.1
-# ml-dtypes>=0.5.1,<1.0.0
+# Pinned heavy ML packages - use Python 3.10 on the host
+tensorflow==2.17.1
+pennylane==0.41.0
+ml-dtypes>=0.5.1,<1.0.0
+# If your model requires jax/jaxlib, install compatible versions for CPU:
 # jax==0.4.26
 # jaxlib==0.4.26
-# pennylane==0.41.0
-# autoray>=0.6.11
+
+# Notes:
+# - Streamlit Cloud may still fail to build these wheels depending on the
+#   platform's available Python version and system libs. For reliable hosting,
+#   prefer a Docker-based deploy (Cloud Run, Render with Docker, etc.).
