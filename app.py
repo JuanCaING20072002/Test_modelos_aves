@@ -1032,9 +1032,10 @@ if nav.startswith("🔍"):
                         st.image(ref, caption=f"{com} — {probs[idx]*100:.1f}%", use_container_width=True)
                     else:
                         st.caption(f"{com} — {probs[idx]*100:.1f}% (sin imagen de referencia)")
-                    if st.button("Elegir", key=f"btn_choose_{model_name}_{int(idx)}"):
-                        st.session_state[sel_key] = int(idx)
-                        selected_idx = int(idx)
+                # usar `j` en la clave para evitar claves duplicadas cuando `idx` pueda repetirse
+                if st.button("Elegir", key=f"btn_choose_{model_name}_{j}_{int(idx)}"):
+                st.session_state[sel_key] = int(idx)
+                selected_idx = int(idx)
             try:
                 default_radio_index = list(top_idx_sorted).index(selected_idx)
             except ValueError:
