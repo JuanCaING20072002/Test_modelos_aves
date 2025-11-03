@@ -636,12 +636,82 @@ def predict_proba(x: np.ndarray) -> np.ndarray:
     return preds
 # Buscar imagen de referencia para una clase
 def find_reference_image(class_name: str):
-    for split in ["test", "train"]:
+    """Buscar una imagen de referencia para una clase.
+
+    Estrategia (en este orden):
+    1. Buscar carpeta exacta `datos/{split}/{class_name}` en splits ['valid','test','train'].
+    2. Si `class_name` tiene formato 'class_{i}', mapear al i-ésimo subdirectorio ordenado en `datos/{split}`.
+    3. Buscar en carpetas del modelo (`MODEL_PATH`) en subdirs comunes: assets, examples, reference.
+    4. Buscar por coincidencia parcial de nombre de archivo en `datos/` y `modelos/` (filename contiene clase o nombre común).
+    Devuelve ruta absoluta de la primera imagen encontrada o None si no hay coincidencias.
+    """
+    img_exts = (".jpg", ".jpeg", ".png")
+    # 1) intentos directos en datos/{split}/{class_name}
+    for split in ["valid", "test", "train"]:
         candidate_dir = os.path.join("datos", split, class_name)
         if os.path.isdir(candidate_dir):
-            for fname in os.listdir(candidate_dir):
-                if fname.lower().endswith((".jpg", ".jpeg", ".png")):
+            for fname in sorted(os.listdir(candidate_dir)):
+                if fname.lower().endswith(img_exts):
                     return os.path.join(candidate_dir, fname)
+
+    # 2) si la etiqueta tiene formato class_{i}, mapear al i-ésimo subdirectorio en datos/{split}
+    import re
+    m = re.match(r"class_(\d+)$", class_name)
+    if m:
+        idx = int(m.group(1))
+        for split in ["valid", "train", "test"]:
+            root = os.path.join("datos", split)
+            if os.path.isdir(root):
+                try:
+                    subs = sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
+                    if 0 <= idx < len(subs):
+                        candidate_dir = os.path.join(root, subs[idx])
+                        for fname in sorted(os.listdir(candidate_dir)):
+                            if fname.lower().endswith(img_exts):
+                                return os.path.join(candidate_dir, fname)
+                except Exception:
+                    pass
+
+    # 3) buscar en el directorio del modelo (ej.: modelos/<name>/assets, examples, reference)
+    try:
+        model_root = MODEL_PATH if 'MODEL_PATH' in globals() else None
+        if model_root:
+            for sub in ("assets", "examples", "reference", "refs", "imgs"):
+                cand = os.path.join(model_root, sub)
+                if os.path.isdir(cand):
+                    # buscar archivo que contenga el nombre de clase o el nombre común
+                    for fname in sorted(os.listdir(cand)):
+                        low = fname.lower()
+                        if low.endswith(img_exts):
+                            if class_name.lower() in low:
+                                return os.path.join(cand, fname)
+                            # también buscar por nombre común
+                            common = COMMON_NAMES.get(class_name, "").lower()
+                            if common and common in low:
+                                return os.path.join(cand, fname)
+                    # si no hay match por nombre, devolver la primera imagen como fallback
+                    for fname in sorted(os.listdir(cand)):
+                        if fname.lower().endswith(img_exts):
+                            return os.path.join(cand, fname)
+    except Exception:
+        pass
+
+    # 4) búsqueda amplia: archivos en datos/ que contengan el nombre de clase o nombre común
+    search_roots = [os.path.join("datos", p) for p in ("valid", "train", "test")] + [os.path.join("modelos", d) for d in os.listdir("modelos") if os.path.isdir(os.path.join("modelos", d))]
+    for root in search_roots:
+        if not os.path.isdir(root):
+            continue
+        for dirpath, _, files in os.walk(root):
+            for fname in files:
+                low = fname.lower()
+                if not low.endswith(img_exts):
+                    continue
+                if class_name.lower() in low:
+                    return os.path.join(dirpath, fname)
+                common = COMMON_NAMES.get(class_name, "").lower()
+                if common and common in low:
+                    return os.path.join(dirpath, fname)
+
     return None
 
 # ============================
