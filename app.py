@@ -844,39 +844,47 @@ if nav.startswith("🔍"):
 
     # Si hubo predicción válida, construir y mostrar Top-K y detalles
     if predicted:
+        # Preparar lista de etiquetas: preferir `classes`, si no existe inferir etiquetas genéricas
+        if classes and len(classes) > 0:
+            cls_list = classes
+        else:
+            try:
+                n_out = int(probs.shape[-1])
+            except Exception:
+                n_out = int(getattr(probs, 'size', 0))
+            cls_list = [f"class_{i}" for i in range(n_out)]
+            st.warning("No se encontraron nombres de clases; usando etiquetas inferidas (class_0, class_1, ...).")
+
         # Sugerencias Top-3
-        suggest_k = min(3, len(classes))
+        suggest_k = min(3, len(cls_list))
         try:
             top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
         except Exception:
-            top_idx_sorted = np.arange(min(suggest_k, len(classes)))
+            top_idx_sorted = np.arange(min(suggest_k, len(cls_list)))
         default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
-        default_class = classes[default_idx]
+        default_class = cls_list[default_idx]
         default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
 
         # Construir opciones legibles
         options = []
         idx_map = {}
         for idx in top_idx_sorted:
-            sci = classes[int(idx)]
+            sci = cls_list[int(idx)]
             com = COMMON_NAMES.get(sci, sci)
             label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
             options.append(label)
             idx_map[label] = int(idx)
 
         with c2:
-            # Mostrar la sugerencia principal como métrica
             st.metric("Predicción sugerida", COMMON_NAMES.get(default_class, default_class))
             st.metric("Confianza", f"{default_conf*100:.2f}%")
             st.markdown("### Opciones Top-3")
-            # Mostrar imágenes de las opciones Top-3 (para ayudar a elegir visualmente)
             cols = st.columns(suggest_k)
-            # Sincronización selección (por botón o por radio)
             sel_key = f"sel_idx_pred_{model_name}"
             selected_idx = st.session_state.get(sel_key, default_idx)
             for j, idx in enumerate(top_idx_sorted):
                 idx = int(idx)
-                sci = classes[idx]
+                sci = cls_list[idx]
                 com = COMMON_NAMES.get(sci, sci)
                 ref = find_reference_image(sci)
                 with cols[j]:
@@ -884,11 +892,9 @@ if nav.startswith("🔍"):
                         st.image(ref, caption=f"{com} — {probs[idx]*100:.1f}%", use_container_width=True)
                     else:
                         st.caption(f"{com} — {probs[idx]*100:.1f}% (sin imagen de referencia)")
-                    # Botón para seleccionar por imagen
                     if st.button("Elegir", key=f"btn_choose_{model_name}_{int(idx)}"):
                         st.session_state[sel_key] = int(idx)
                         selected_idx = int(idx)
-            # Permitir elegir entre las Top-3 (radio)
             try:
                 default_radio_index = list(top_idx_sorted).index(selected_idx)
             except ValueError:
@@ -897,11 +903,10 @@ if nav.startswith("🔍"):
             sel_idx = idx_map.get(choice, int(top_idx_sorted[0]))
             if sel_idx != selected_idx:
                 st.session_state[sel_key] = int(sel_idx)
-            sel_class = classes[int(sel_idx)]
+            sel_class = cls_list[int(sel_idx)]
             sel_common = COMMON_NAMES.get(sel_class, sel_class)
             sel_conf = float(probs[int(sel_idx)])
 
-            # Mostrar detalles para la selección
             st.write(f"Nombre científico: **{sel_class}**")
             st.write(f"Nombre común: **{sel_common}**")
             desc = DESCRIPCIONES.get(sel_class, "Descripción no disponible.")
@@ -912,10 +917,11 @@ if nav.startswith("🔍"):
             ref_path = find_reference_image(sel_class)
             if ref_path:
                 st.image(ref_path, caption=f"Ejemplo de {sel_class}", use_container_width=True)
+
         # Top-K gráfico
-        k = min(top_k, len(classes))
+        k = min(top_k, len(cls_list))
         top_k_idx = np.argsort(probs)[-k:][::-1]
-        top_labels = [COMMON_NAMES.get(classes[int(i)], classes[int(i)]) for i in top_k_idx]
+        top_labels = [COMMON_NAMES.get(cls_list[int(i)], cls_list[int(i)]) for i in top_k_idx]
         top_df = pd.DataFrame({
             "Clase (común)": top_labels,
             "Probabilidad": [float(probs[int(i)]) for i in top_k_idx],
