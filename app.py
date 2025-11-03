@@ -60,6 +60,12 @@ st.caption("Sube una imagen para identificar la especie o revisa el desempeño d
 MODELS_DIR = "modelos"
 BATCH_SIZE = 32 # Tamaño de lote para evaluación
 IMG_SIZE = (224, 224)  # Forma esperada por VGG16
+# Opcional: forzar una lista blanca de modelos (usar nombres de carpeta o nombres de archivo sin extensión)
+# Si quieres usar sólo los dos modelos clásicos, define aquí la lista. Poner None para usar cualquier modelo en `modelos/`.
+MODEL_WHITELIST = [
+    "0vgg16_01_l_128_acc_32_42_data04",
+    "mobilenetv2_aves_01_l_128_acc_32_42_data04",
+]
 # ============================
 # Cargar modelo entrenado
 # ============================
@@ -454,6 +460,24 @@ def list_available_models():
                 # use filename without extension as model name
                 key = os.path.splitext(name)[0]
                 models[key] = path
+    # Si existe una lista blanca, filtrar los modelos a los listados ahí
+    if MODEL_WHITELIST:
+        filtered = {}
+        for keep in MODEL_WHITELIST:
+            if keep in models:
+                filtered[keep] = models[keep]
+            else:
+                # también intentar detectar por prefijo/contiene (por si el nombre de archivo difiere)
+                for k, v in models.items():
+                    if keep == k or k.startswith(keep) or keep in k:
+                        filtered[k] = v
+                        break
+        if not filtered:
+            # si la whitelist no coincide con nada, devolver todos para no romper la app
+            st.warning("MODEL_WHITELIST configurada pero no coincide con modelos en 'modelos/'; mostrando todos.")
+            return models
+        return filtered
+
     return models
 
 @st.cache_data(show_spinner=False)
@@ -784,29 +808,59 @@ if nav.startswith("🔍"):
 
     st.subheader("Sube una imagen de un ave")
     up = st.file_uploader("Elige una imagen (JPG/PNG)", type=["jpg", "jpeg", "png"])
+    # Variable que indica si hubo predicción válida
+    predicted = False
+    sel_class = None
     if up is not None:
         if not HAS_TF or load_img is None:
             st.error("TensorFlow/Keras no están disponibles en este despliegue; no se pueden realizar predicciones aquí. Cargue el modelo localmente o despliegue en un runtime compatible.")
+            st.info("Opciones para habilitar predicción: 1) Ejecutar la app localmente con Python 3.10 y TensorFlow/PennyLane instalados, 2) Desplegar un microservicio de inferencia (Docker) con TF/PennyLane y apuntar la UI a ese endpoint.")
         else:
             c1, c2 = st.columns([1, 1])
             with c1:
                 st.image(up, caption="Imagen cargada", use_container_width=True)
-            x = preprocess_image(up, prep_method)
-            probs = predict_proba(x)[0]
+            # Intentar preprocesar y predecir; cualquier error se captura y muestra
+            try:
+                x = preprocess_image(up, prep_method)
+            except Exception as e:
+                st.error(f"Error al preprocesar la imagen: {e}")
+                x = None
+            if x is not None:
+                try:
+                    probs_all = predict_proba(x)
+                    # validar la salida
+                    if probs_all is None:
+                        raise ValueError("predict_proba devolvió None")
+                    probs = np.asarray(probs_all)
+                    # Si la salida tiene batch dim, tomar el primer elemento
+                    if probs.ndim == 2 and probs.shape[0] >= 1:
+                        probs = probs[0]
+                    if probs.ndim != 1:
+                        raise ValueError(f"Salida de predict_proba con shape inesperado: {probs.shape}")
+                    predicted = True
+                except Exception as e:
+                    st.error(f"Error al ejecutar la predicción: {e}")
+                    st.exception(e)
+
+    # Si hubo predicción válida, construir y mostrar Top-K y detalles
+    if predicted:
         # Sugerencias Top-3
         suggest_k = min(3, len(classes))
-        top_idx_sorted = probs.argsort()[-suggest_k:][::-1]
-        default_idx = int(top_idx_sorted[0])
+        try:
+            top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
+        except Exception:
+            top_idx_sorted = np.arange(min(suggest_k, len(classes)))
+        default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
         default_class = classes[default_idx]
-        default_conf = float(probs[default_idx])
+        default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
 
         # Construir opciones legibles
         options = []
         idx_map = {}
         for idx in top_idx_sorted:
-            sci = classes[idx]
+            sci = classes[int(idx)]
             com = COMMON_NAMES.get(sci, sci)
-            label = f"{com} ({sci}) — {probs[idx]*100:.1f}%"
+            label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
             options.append(label)
             idx_map[label] = int(idx)
 
@@ -821,6 +875,7 @@ if nav.startswith("🔍"):
             sel_key = f"sel_idx_pred_{model_name}"
             selected_idx = st.session_state.get(sel_key, default_idx)
             for j, idx in enumerate(top_idx_sorted):
+                idx = int(idx)
                 sci = classes[idx]
                 com = COMMON_NAMES.get(sci, sci)
                 ref = find_reference_image(sci)
@@ -839,12 +894,12 @@ if nav.startswith("🔍"):
             except ValueError:
                 default_radio_index = 0
             choice = st.radio("¿Cuál encaja mejor?", options=options, index=default_radio_index)
-            sel_idx = idx_map[choice]
+            sel_idx = idx_map.get(choice, int(top_idx_sorted[0]))
             if sel_idx != selected_idx:
                 st.session_state[sel_key] = int(sel_idx)
-            sel_class = classes[sel_idx]
+            sel_class = classes[int(sel_idx)]
             sel_common = COMMON_NAMES.get(sel_class, sel_class)
-            sel_conf = float(probs[sel_idx])
+            sel_conf = float(probs[int(sel_idx)])
 
             # Mostrar detalles para la selección
             st.write(f"Nombre científico: **{sel_class}**")
@@ -853,17 +908,17 @@ if nav.startswith("🔍"):
             st.write(desc)
 
         # Imagen de referencia para la selección
-        if show_ref:
+        if show_ref and sel_class:
             ref_path = find_reference_image(sel_class)
             if ref_path:
                 st.image(ref_path, caption=f"Ejemplo de {sel_class}", use_container_width=True)
         # Top-K gráfico
         k = min(top_k, len(classes))
-        top_k_idx = probs.argsort()[-k:][::-1]
-        top_labels = [COMMON_NAMES.get(classes[i], classes[i]) for i in top_k_idx]
+        top_k_idx = np.argsort(probs)[-k:][::-1]
+        top_labels = [COMMON_NAMES.get(classes[int(i)], classes[int(i)]) for i in top_k_idx]
         top_df = pd.DataFrame({
             "Clase (común)": top_labels,
-            "Probabilidad": [float(probs[i]) for i in top_k_idx],
+            "Probabilidad": [float(probs[int(i)]) for i in top_k_idx],
         })
         st.bar_chart(top_df.set_index("Clase (común)"))
 
