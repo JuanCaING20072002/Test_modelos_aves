@@ -844,19 +844,42 @@ if nav.startswith("🔍"):
 
     # Si hubo predicción válida, construir y mostrar Top-K y detalles
     if predicted:
-        # Preparar lista de etiquetas: preferir `classes`, si no existe inferir etiquetas genéricas
+        # Preparar lista de etiquetas: preferir `classes`, sino intentar cargar desde archivos
         if classes and len(classes) > 0:
             cls_list = classes
+            inferred_from = "model/classes file"
         else:
+            # 1) intentar load_class_names (intenta clases al lado del modelo o dataset)
             try:
-                n_out = int(probs.shape[-1])
+                inferred = load_class_names(MODEL_PATH)
             except Exception:
-                n_out = int(getattr(probs, 'size', 0))
-            cls_list = [f"class_{i}" for i in range(n_out)]
-            st.warning("No se encontraron nombres de clases; usando etiquetas inferidas (class_0, class_1, ...).")
+                inferred = []
+            # 2) si sigue vacío, intentar leer las carpetas en datos/valid o datos/train
+            if not inferred:
+                for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train")]:
+                    if os.path.isdir(candidate):
+                        try:
+                            inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
+                            if inferred:
+                                break
+                        except Exception:
+                            inferred = []
+            if inferred:
+                cls_list = inferred
+                inferred_from = "dataset folders (datos/)"
+                st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
+            else:
+                # último recurso: construir etiquetas genéricas class_0, class_1, ... según la dimensión de probs
+                try:
+                    n_out = int(probs.shape[-1])
+                except Exception:
+                    n_out = int(getattr(probs, 'size', 0))
+                cls_list = [f"class_{i}" for i in range(n_out)]
+                inferred_from = "generated labels"
+                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
-        # Sugerencias Top-3
-        suggest_k = min(3, len(cls_list))
+    # Sugerencias Top-3
+    suggest_k = min(3, len(cls_list))
         try:
             top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
         except Exception:
@@ -918,8 +941,11 @@ if nav.startswith("🔍"):
             if ref_path:
                 st.image(ref_path, caption=f"Ejemplo de {sel_class}", use_container_width=True)
 
-        # Top-K gráfico
-        k = min(top_k, len(cls_list))
+        # Top-K gráfico: si estamos usando etiquetas inferidas/desde dataset, preferimos mostrar Top-3
+        if inferred_from != "model/classes file":
+            k = min(3, len(cls_list))
+        else:
+            k = min(top_k, len(cls_list))
         top_k_idx = np.argsort(probs)[-k:][::-1]
         top_labels = [COMMON_NAMES.get(cls_list[int(i)], cls_list[int(i)]) for i in top_k_idx]
         top_df = pd.DataFrame({
