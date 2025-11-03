@@ -60,12 +60,6 @@ st.caption("Sube una imagen para identificar la especie o revisa el desempeño d
 MODELS_DIR = "modelos"
 BATCH_SIZE = 32 # Tamaño de lote para evaluación
 IMG_SIZE = (224, 224)  # Forma esperada por VGG16
-# Opcional: forzar una lista blanca de modelos (usar nombres de carpeta o nombres de archivo sin extensión)
-# Si quieres usar sólo los dos modelos clásicos, define aquí la lista. Poner None para usar cualquier modelo en `modelos/`.
-MODEL_WHITELIST = [
-    "0vgg16_01_l_128_acc_32_42_data04",
-    "mobilenetv2_aves_01_l_128_acc_32_42_data04",
-]
 # ============================
 # Cargar modelo entrenado
 # ============================
@@ -460,24 +454,6 @@ def list_available_models():
                 # use filename without extension as model name
                 key = os.path.splitext(name)[0]
                 models[key] = path
-    # Si existe una lista blanca, filtrar los modelos a los listados ahí
-    if MODEL_WHITELIST:
-        filtered = {}
-        for keep in MODEL_WHITELIST:
-            if keep in models:
-                filtered[keep] = models[keep]
-            else:
-                # también intentar detectar por prefijo/contiene (por si el nombre de archivo difiere)
-                for k, v in models.items():
-                    if keep == k or k.startswith(keep) or keep in k:
-                        filtered[k] = v
-                        break
-        if not filtered:
-            # si la whitelist no coincide con nada, devolver todos para no romper la app
-            st.warning("MODEL_WHITELIST configurada pero no coincide con modelos en 'modelos/'; mostrando todos.")
-            return models
-        return filtered
-
     return models
 
 @st.cache_data(show_spinner=False)
@@ -636,82 +612,12 @@ def predict_proba(x: np.ndarray) -> np.ndarray:
     return preds
 # Buscar imagen de referencia para una clase
 def find_reference_image(class_name: str):
-    """Buscar una imagen de referencia para una clase.
-
-    Estrategia (en este orden):
-    1. Buscar carpeta exacta `datos/{split}/{class_name}` en splits ['valid','test','train'].
-    2. Si `class_name` tiene formato 'class_{i}', mapear al i-ésimo subdirectorio ordenado en `datos/{split}`.
-    3. Buscar en carpetas del modelo (`MODEL_PATH`) en subdirs comunes: assets, examples, reference.
-    4. Buscar por coincidencia parcial de nombre de archivo en `datos/` y `modelos/` (filename contiene clase o nombre común).
-    Devuelve ruta absoluta de la primera imagen encontrada o None si no hay coincidencias.
-    """
-    img_exts = (".jpg", ".jpeg", ".png")
-    # 1) intentos directos en datos/{split}/{class_name}
-    for split in ["valid", "test", "train"]:
+    for split in ["test", "train"]:
         candidate_dir = os.path.join("datos", split, class_name)
         if os.path.isdir(candidate_dir):
-            for fname in sorted(os.listdir(candidate_dir)):
-                if fname.lower().endswith(img_exts):
+            for fname in os.listdir(candidate_dir):
+                if fname.lower().endswith((".jpg", ".jpeg", ".png")):
                     return os.path.join(candidate_dir, fname)
-
-    # 2) si la etiqueta tiene formato class_{i}, mapear al i-ésimo subdirectorio en datos/{split}
-    import re
-    m = re.match(r"class_(\d+)$", class_name)
-    if m:
-        idx = int(m.group(1))
-        for split in ["valid", "train", "test"]:
-            root = os.path.join("datos", split)
-            if os.path.isdir(root):
-                try:
-                    subs = sorted([d for d in os.listdir(root) if os.path.isdir(os.path.join(root, d))])
-                    if 0 <= idx < len(subs):
-                        candidate_dir = os.path.join(root, subs[idx])
-                        for fname in sorted(os.listdir(candidate_dir)):
-                            if fname.lower().endswith(img_exts):
-                                return os.path.join(candidate_dir, fname)
-                except Exception:
-                    pass
-
-    # 3) buscar en el directorio del modelo (ej.: modelos/<name>/assets, examples, reference)
-    try:
-        model_root = MODEL_PATH if 'MODEL_PATH' in globals() else None
-        if model_root:
-            for sub in ("assets", "examples", "reference", "refs", "imgs"):
-                cand = os.path.join(model_root, sub)
-                if os.path.isdir(cand):
-                    # buscar archivo que contenga el nombre de clase o el nombre común
-                    for fname in sorted(os.listdir(cand)):
-                        low = fname.lower()
-                        if low.endswith(img_exts):
-                            if class_name.lower() in low:
-                                return os.path.join(cand, fname)
-                            # también buscar por nombre común
-                            common = COMMON_NAMES.get(class_name, "").lower()
-                            if common and common in low:
-                                return os.path.join(cand, fname)
-                    # si no hay match por nombre, devolver la primera imagen como fallback
-                    for fname in sorted(os.listdir(cand)):
-                        if fname.lower().endswith(img_exts):
-                            return os.path.join(cand, fname)
-    except Exception:
-        pass
-
-    # 4) búsqueda amplia: archivos en datos/ que contengan el nombre de clase o nombre común
-    search_roots = [os.path.join("datos", p) for p in ("valid", "train", "test")] + [os.path.join("modelos", d) for d in os.listdir("modelos") if os.path.isdir(os.path.join("modelos", d))]
-    for root in search_roots:
-        if not os.path.isdir(root):
-            continue
-        for dirpath, _, files in os.walk(root):
-            for fname in files:
-                low = fname.lower()
-                if not low.endswith(img_exts):
-                    continue
-                if class_name.lower() in low:
-                    return os.path.join(dirpath, fname)
-                common = COMMON_NAMES.get(class_name, "").lower()
-                if common and common in low:
-                    return os.path.join(dirpath, fname)
-
     return None
 
 # ============================
@@ -863,168 +769,50 @@ if nav.startswith("🔍"):
     st.sidebar.markdown("---")
     st.sidebar.subheader("Opciones de predicción")
     prep_method = st.sidebar.selectbox("Preprocesamiento", ["x/255", "VGG16"], index=0)
-    num_classes = len(classes)
-    # Si no hay suficientes clases para un slider (min == max), evitar el slider y
-    # usar un valor por defecto de 1. Esto evita StreamlitAPIException cuando
-    # num_classes <= 1 (por ejemplo en despliegues sin TF donde no se pudieron
-    # leer las clases del modelo/dataset).
-    if num_classes <= 1:
-        top_k = 1
-        st.sidebar.info("Top-K deshabilitado: menos de 2 clases disponibles.")
-    else:
-        max_k = min(10, num_classes)
-        top_k = st.sidebar.slider("Top-K", min_value=1, max_value=max_k, value=min(5, max_k))
+    num_classes = max(1, len(classes))
+    top_k = st.sidebar.slider("Top-K", min_value=1, max_value=min(10, num_classes), value=min(5, num_classes))
     show_ref = st.sidebar.checkbox("Mostrar imagen de referencia", value=True)
 
     st.subheader("Sube una imagen de un ave")
     up = st.file_uploader("Elige una imagen (JPG/PNG)", type=["jpg", "jpeg", "png"])
-    # Variable que indica si hubo predicción válida
-    predicted = False
-    sel_class = None
     if up is not None:
         if not HAS_TF or load_img is None:
             st.error("TensorFlow/Keras no están disponibles en este despliegue; no se pueden realizar predicciones aquí. Cargue el modelo localmente o despliegue en un runtime compatible.")
-            st.info("Opciones para habilitar predicción: 1) Ejecutar la app localmente con Python 3.10 y TensorFlow/PennyLane instalados, 2) Desplegar un microservicio de inferencia (Docker) con TF/PennyLane y apuntar la UI a ese endpoint.")
         else:
             c1, c2 = st.columns([1, 1])
             with c1:
                 st.image(up, caption="Imagen cargada", use_container_width=True)
-            # Intentar preprocesar y predecir; cualquier error se captura y muestra
-            try:
-                x = preprocess_image(up, prep_method)
-            except Exception as e:
-                st.error(f"Error al preprocesar la imagen: {e}")
-                x = None
-            if x is not None:
-                try:
-                    probs_all = predict_proba(x)
-                    # validar la salida
-                    if probs_all is None:
-                        raise ValueError("predict_proba devolvió None")
-                    probs = np.asarray(probs_all)
-                    # Si la salida tiene batch dim, tomar el primer elemento
-                    if probs.ndim == 2 and probs.shape[0] >= 1:
-                        probs = probs[0]
-                    if probs.ndim != 1:
-                        raise ValueError(f"Salida de predict_proba con shape inesperado: {probs.shape}")
-                    predicted = True
-                except Exception as e:
-                    st.error(f"Error al ejecutar la predicción: {e}")
-                    st.exception(e)
+            x = preprocess_image(up, prep_method)
+            probs = predict_proba(x)[0]
+        # Sugerencias Top-3
+        suggest_k = min(3, len(classes))
+        top_idx_sorted = probs.argsort()[-suggest_k:][::-1]
+        default_idx = int(top_idx_sorted[0])
+        default_class = classes[default_idx]
+        default_conf = float(probs[default_idx])
 
-    # Si hubo predicción válida, construir y mostrar Top-K y detalles
-    if predicted:
-        # Preparar lista de etiquetas: preferir `classes`, sino intentar cargar desde archivos
-        if classes and len(classes) > 0:
-            cls_list = classes
-            inferred_from = "model/classes file"
-        else:
-            # 1) intentar load_class_names (intenta clases al lado del modelo o dataset)
-            try:
-                inferred = load_class_names(MODEL_PATH)
-            except Exception:
-                inferred = []
-            # 2) si sigue vacío, intentar leer las carpetas en datos/valid o datos/train
-            if not inferred:
-                for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train")]:
-                    if os.path.isdir(candidate):
-                        try:
-                            inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
-                            if inferred:
-                                break
-                        except Exception:
-                            inferred = []
-            if inferred:
-                cls_list = inferred
-                inferred_from = "dataset folders (datos/)"
-                st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
-            else:
-                # último recurso: construir etiquetas genéricas class_0, class_1, ... según la dimensión de probs
-                try:
-                    n_out = int(probs.shape[-1])
-                except Exception:
-                    n_out = int(getattr(probs, 'size', 0))
-                cls_list = [f"class_{i}" for i in range(n_out)]
-                inferred_from = "generated labels"
-                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
-
-    # Sugerencias Top-3
-    # Defensive: asegurar que `probs` y `cls_list` existen antes de indexar
-    if ('probs' not in locals()) or (probs is None):
-        probs = np.array([])
-
-    # Asegurar que cls_list existe y no está vacío. Si está vacío, intentar inferir desde archivos
-    if ('cls_list' not in locals()) or (not cls_list):
-        try:
-            inferred = load_class_names(MODEL_PATH)
-        except Exception:
-            inferred = []
-        if not inferred:
-            for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train"), os.path.join("datos", "test")]:
-                if os.path.isdir(candidate):
-                    try:
-                        inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
-                        if inferred:
-                            break
-                    except Exception:
-                        inferred = []
-        if inferred:
-            cls_list = inferred
-            inferred_from = "dataset folders (datos/)"
-            st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
-        else:
-            # último recurso: generar etiquetas desde la dimensión de probs
-            try:
-                n_out = int(probs.shape[-1])
-            except Exception:
-                try:
-                    n_out = int(np.asarray(probs).size)
-                except Exception:
-                    n_out = 0
-            if n_out <= 0:
-                cls_list = []
-            else:
-                cls_list = [f"class_{i}" for i in range(n_out)]
-                inferred_from = "generated labels"
-                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
-
-    # Sugerencias Top-3 y cálculo de índices, filtrando índices fuera de rango
-    suggest_k = min(3, max(0, len(cls_list)))
-    try:
-        raw_idx = np.argsort(probs)[-suggest_k:][::-1] if suggest_k > 0 else np.array([], dtype=int)
-    except Exception:
-        raw_idx = np.arange(min(suggest_k, len(cls_list))) if suggest_k > 0 else np.array([], dtype=int)
-
-    # Filtrar índices que excedan el tamaño de cls_list o de probs
-    top_idx_sorted = [int(i) for i in raw_idx if (int(i) < len(cls_list) and int(i) < np.asarray(probs).size)]
-    if not top_idx_sorted:
-        # fallback: usar primeros elementos válidos
-        top_idx_sorted = list(range(min(len(cls_list), int(np.asarray(probs).size))))
-    default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
-    # Proteger acceso si cls_list está vacío
-    default_class = cls_list[default_idx] if len(cls_list) > default_idx else f"class_{default_idx}"
-    default_conf = float(probs[default_idx]) if np.asarray(probs).size > default_idx else 0.0
-
-    # Construir opciones legibles
-    options = []
-    idx_map = {}
-    for idx in top_idx_sorted:
-        sci = cls_list[int(idx)]
-        com = COMMON_NAMES.get(sci, sci)
-        label = f"{com} ({sci}) — {probs[int(idx)]*100:.1f}%"
-        options.append(label)
-        idx_map[label] = int(idx)
+        # Construir opciones legibles
+        options = []
+        idx_map = {}
+        for idx in top_idx_sorted:
+            sci = classes[idx]
+            com = COMMON_NAMES.get(sci, sci)
+            label = f"{com} ({sci}) — {probs[idx]*100:.1f}%"
+            options.append(label)
+            idx_map[label] = int(idx)
 
         with c2:
+            # Mostrar la sugerencia principal como métrica
             st.metric("Predicción sugerida", COMMON_NAMES.get(default_class, default_class))
             st.metric("Confianza", f"{default_conf*100:.2f}%")
             st.markdown("### Opciones Top-3")
+            # Mostrar imágenes de las opciones Top-3 (para ayudar a elegir visualmente)
             cols = st.columns(suggest_k)
+            # Sincronización selección (por botón o por radio)
             sel_key = f"sel_idx_pred_{model_name}"
             selected_idx = st.session_state.get(sel_key, default_idx)
             for j, idx in enumerate(top_idx_sorted):
-                idx = int(idx)
-                sci = cls_list[idx]
+                sci = classes[idx]
                 com = COMMON_NAMES.get(sci, sci)
                 ref = find_reference_image(sci)
                 with cols[j]:
@@ -1032,43 +820,41 @@ if nav.startswith("🔍"):
                         st.image(ref, caption=f"{com} — {probs[idx]*100:.1f}%", use_container_width=True)
                     else:
                         st.caption(f"{com} — {probs[idx]*100:.1f}% (sin imagen de referencia)")
-                # usar `j` en la clave para evitar claves duplicadas cuando `idx` pueda repetirse
-                if st.button("Elegir", key=f"btn_choose_{model_name}_{j}_{int(idx)}"):
-                st.session_state[sel_key] = int(idx)
-                selected_idx = int(idx)
+                    # Botón para seleccionar por imagen
+                    if st.button("Elegir", key=f"btn_choose_{model_name}_{int(idx)}"):
+                        st.session_state[sel_key] = int(idx)
+                        selected_idx = int(idx)
+            # Permitir elegir entre las Top-3 (radio)
             try:
                 default_radio_index = list(top_idx_sorted).index(selected_idx)
             except ValueError:
                 default_radio_index = 0
             choice = st.radio("¿Cuál encaja mejor?", options=options, index=default_radio_index)
-            sel_idx = idx_map.get(choice, int(top_idx_sorted[0]))
+            sel_idx = idx_map[choice]
             if sel_idx != selected_idx:
                 st.session_state[sel_key] = int(sel_idx)
-            sel_class = cls_list[int(sel_idx)]
+            sel_class = classes[sel_idx]
             sel_common = COMMON_NAMES.get(sel_class, sel_class)
-            sel_conf = float(probs[int(sel_idx)])
+            sel_conf = float(probs[sel_idx])
 
+            # Mostrar detalles para la selección
             st.write(f"Nombre científico: **{sel_class}**")
             st.write(f"Nombre común: **{sel_common}**")
             desc = DESCRIPCIONES.get(sel_class, "Descripción no disponible.")
             st.write(desc)
 
         # Imagen de referencia para la selección
-        if show_ref and sel_class:
+        if show_ref:
             ref_path = find_reference_image(sel_class)
             if ref_path:
                 st.image(ref_path, caption=f"Ejemplo de {sel_class}", use_container_width=True)
-
-        # Top-K gráfico: si estamos usando etiquetas inferidas/desde dataset, preferimos mostrar Top-3
-        if inferred_from != "model/classes file":
-            k = min(3, len(cls_list))
-        else:
-            k = min(top_k, len(cls_list))
-        top_k_idx = np.argsort(probs)[-k:][::-1]
-        top_labels = [COMMON_NAMES.get(cls_list[int(i)], cls_list[int(i)]) for i in top_k_idx]
+        # Top-K gráfico
+        k = min(top_k, len(classes))
+        top_k_idx = probs.argsort()[-k:][::-1]
+        top_labels = [COMMON_NAMES.get(classes[i], classes[i]) for i in top_k_idx]
         top_df = pd.DataFrame({
             "Clase (común)": top_labels,
-            "Probabilidad": [float(probs[int(i)]) for i in top_k_idx],
+            "Probabilidad": [float(probs[i]) for i in top_k_idx],
         })
         st.bar_chart(top_df.set_index("Clase (común)"))
 
@@ -1177,19 +963,7 @@ else:
         progress.empty()
 
         df_cmp = pd.DataFrame(rows)
-        # Asegurar que las columnas numéricas sean numéricas (None -> NaN)
-        for col in ("Accuracy", "Top-3"):
-            if col in df_cmp.columns:
-                df_cmp[col] = pd.to_numeric(df_cmp[col], errors="coerce")
-
-        # Crear una versión segura para mostrar (convertir NaN a 'N/A' y formatear porcentajes)
-        df_display = df_cmp.copy()
-        if "Accuracy" in df_display.columns:
-            df_display["Accuracy"] = df_display["Accuracy"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
-        if "Top-3" in df_display.columns:
-            df_display["Top-3"] = df_display["Top-3"].apply(lambda v: f"{v:.2%}" if pd.notna(v) else "N/A")
-
-        st.dataframe(df_display, use_container_width=True)
+        st.dataframe(df_cmp.style.format({"Accuracy": "{:.2%}", "Top-3": "{:.2%}"}), use_container_width=True)
         # Gráfico de barras de accuracy
         chart_df = df_cmp.set_index("Modelo")["Accuracy"]
         st.bar_chart(chart_df)
