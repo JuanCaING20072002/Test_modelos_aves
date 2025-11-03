@@ -949,7 +949,12 @@ if nav.startswith("🔍"):
                 st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
     # Sugerencias Top-3
-    suggest_k = min(3, len(cls_list))
+    try:
+        suggest_k = min(3, len(cls_list))
+    except NameError:
+        # defensive: asegurar que cls_list exista
+        cls_list = classes if ('classes' in globals() and classes) else []
+        suggest_k = min(3, len(cls_list))
     try:
         top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
     except Exception:
