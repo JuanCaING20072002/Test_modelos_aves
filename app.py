@@ -1034,8 +1034,8 @@ if nav.startswith("🔍"):
                         st.caption(f"{com} — {probs[idx]*100:.1f}% (sin imagen de referencia)")
                 # usar `j` en la clave para evitar claves duplicadas cuando `idx` pueda repetirse
                 if st.button("Elegir", key=f"btn_choose_{model_name}_{j}_{int(idx)}"):
-                st.session_state[sel_key] = int(idx)
-                selected_idx = int(idx)
+                    st.session_state[sel_key] = int(idx)
+                    selected_idx = int(idx)
             try:
                 default_radio_index = list(top_idx_sorted).index(selected_idx)
             except ValueError:
