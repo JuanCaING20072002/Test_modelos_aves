@@ -949,19 +949,57 @@ if nav.startswith("🔍"):
                 st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
 
     # Sugerencias Top-3
+    # Asegurar que cls_list existe y no está vacío. Si está vacío, intentar inferir desde archivos
+    if ('cls_list' not in locals()) or (not cls_list):
+        try:
+            inferred = load_class_names(MODEL_PATH)
+        except Exception:
+            inferred = []
+        if not inferred:
+            for candidate in [os.path.join("datos", "valid"), os.path.join("datos", "train"), os.path.join("datos", "test")]:
+                if os.path.isdir(candidate):
+                    try:
+                        inferred = sorted([d for d in os.listdir(candidate) if os.path.isdir(os.path.join(candidate, d))])
+                        if inferred:
+                            break
+                    except Exception:
+                        inferred = []
+        if inferred:
+            cls_list = inferred
+            inferred_from = "dataset folders (datos/)"
+            st.info(f"Usando nombres de clases inferidos desde {inferred_from}.")
+        else:
+            # último recurso: generar etiquetas desde la dimensión de probs
+            try:
+                n_out = int(probs.shape[-1])
+            except Exception:
+                try:
+                    n_out = int(np.asarray(probs).size)
+                except Exception:
+                    n_out = 0
+            if n_out <= 0:
+                cls_list = []
+            else:
+                cls_list = [f"class_{i}" for i in range(n_out)]
+                inferred_from = "generated labels"
+                st.warning("No se encontraron nombres de clases; usando etiquetas generadas (class_0, class_1, ...).")
+
+    # Sugerencias Top-3 y cálculo de índices, filtrando índices fuera de rango
+    suggest_k = min(3, max(0, len(cls_list)))
     try:
-        suggest_k = min(3, len(cls_list))
-    except NameError:
-        # defensive: asegurar que cls_list exista
-        cls_list = classes if ('classes' in globals() and classes) else []
-        suggest_k = min(3, len(cls_list))
-    try:
-        top_idx_sorted = np.argsort(probs)[-suggest_k:][::-1]
+        raw_idx = np.argsort(probs)[-suggest_k:][::-1] if suggest_k > 0 else np.array([], dtype=int)
     except Exception:
-        top_idx_sorted = np.arange(min(suggest_k, len(cls_list)))
+        raw_idx = np.arange(min(suggest_k, len(cls_list))) if suggest_k > 0 else np.array([], dtype=int)
+
+    # Filtrar índices que excedan el tamaño de cls_list o de probs
+    top_idx_sorted = [int(i) for i in raw_idx if (int(i) < len(cls_list) and int(i) < np.asarray(probs).size)]
+    if not top_idx_sorted:
+        # fallback: usar primeros elementos válidos
+        top_idx_sorted = list(range(min(len(cls_list), int(np.asarray(probs).size))))
     default_idx = int(top_idx_sorted[0]) if len(top_idx_sorted) > 0 else 0
-    default_class = cls_list[default_idx]
-    default_conf = float(probs[default_idx]) if probs.size > default_idx else 0.0
+    # Proteger acceso si cls_list está vacío
+    default_class = cls_list[default_idx] if len(cls_list) > default_idx else f"class_{default_idx}"
+    default_conf = float(probs[default_idx]) if np.asarray(probs).size > default_idx else 0.0
 
     # Construir opciones legibles
     options = []
